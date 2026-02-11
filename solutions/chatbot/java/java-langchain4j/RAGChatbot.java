@@ -3,7 +3,6 @@
 //DEPS dev.langchain4j:langchain4j:1.7.1
 //DEPS dev.langchain4j:langchain4j-open-ai:1.7.1
 //DEPS ch.qos.logback:logback-classic:1.5.6
-//DEPS dev.langchain4j:langchain4j-ovh-ai:1.7.1-beta14
 //FILES ./resources/logback.xml
 
 import static dev.langchain4j.data.document.loader.FileSystemDocumentLoader.loadDocument;
@@ -26,8 +25,8 @@ import dev.langchain4j.memory.chat.MessageWindowChatMemory;
 import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.embedding.EmbeddingModel;
+import dev.langchain4j.model.openai.OpenAiEmbeddingModel;
 import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
-import dev.langchain4j.model.ovhai.OvhAiEmbeddingModel;
 import dev.langchain4j.rag.content.retriever.ContentRetriever;
 import dev.langchain4j.rag.content.retriever.EmbeddingStoreContentRetriever;
 import dev.langchain4j.service.AiServices;
@@ -40,9 +39,9 @@ import dev.langchain4j.store.embedding.inmemory.InMemoryEmbeddingStore;
  * Here is the place where you will add the code to create an advanced chatbot.
  * The steps to create your chatbot are :
  * - choose the right model on AI Endpoints
- * (https://endpoints.ai.cloud.ovh.net), we want to use Mistral 7B Instruct
+ * (https://endpoints.ai.cloud.ovh.net)
  * - use the LangChain4J wrapper / lib to do the call to the model (use the AI
- * Service style), ⚠️ don't forget your pom.xml ⚠️
+ * Service style)
  * - Use the streaming option, see
  * https://docs.langchain4j.dev/tutorials/response-streaming
  * - Save the context in memory, see
@@ -89,12 +88,12 @@ public class RAGChatbot {
                 List<TextSegment> segments = splitter.split(document);
 
                 // java-20
-                // Do the embeddings with AI Endpoint model
-                // (https://docs.langchain4j.dev/integrations/embedding-models/ovh-ai) and store
+                // Do the embeddings with AI Endpoint model using OpenAI compatibility and store
                 // them in an in memory embedding store
-                EmbeddingModel embeddingModel = OvhAiEmbeddingModel.builder()
+                EmbeddingModel embeddingModel = OpenAiEmbeddingModel.builder()
                                 .apiKey(System.getenv("OVH_AI_ENDPOINTS_ACCESS_TOKEN"))
-                                .baseUrl(System.getenv("OVH_AI_ENDPOINTS_EMBEDDING_MODEL"))
+                                .baseUrl(System.getenv("OVH_AI_ENDPOINTS_MODEL_URL"))
+                                .modelName(System.getenv("OVH_AI_ENDPOINTS_EMBEDDING_MODEL_NAME"))
                                 .build();
                 List<Embedding> embeddings = embeddingModel.embedAll(segments).content();
 
