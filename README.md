@@ -1,7 +1,7 @@
 ## Welcome to the 101 workshop source to discover AI Endpoints.
 
 ## 🔗 Resources 🔗
- - https://endpoints.ai.cloud.ovh.net
+ - https://www.ovhcloud.com/en/public-cloud/ai-endpoints/catalog/
  - https://blog.ovhcloud.com/tag/ai-endpoints/
  - https://github.com/ovh/public-cloud-examples/tree/main/ai/ai-endpoints
 
