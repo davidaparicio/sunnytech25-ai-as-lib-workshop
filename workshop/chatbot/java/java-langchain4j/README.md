@@ -27,6 +27,7 @@ The workshop is divided into progressive modules:
 5. 🎨 **Function Calling** - Create and use tools for image generation
 6. 🔌 **MCP Client** - Consume the MCP server created with Quarkus
 7. 🤖 **Agentic Image Generator** - ReAct loop with LangChain4j Agentic API
+8. 🧑‍💼 **Agentic Image Generator (Supervisor)** - Supervisor pattern with LangChain4j Agentic API
 
 ---
 
@@ -2370,6 +2371,586 @@ A red cat sleeping on a velvet couch
 
 ---
 
+## 🧑‍💼 Module 8: Agentic Image Generator (Supervisor Pattern)
+
+### 🎯 Architecture Overview
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Supervisor as SupervisorAgent (LLM)
+    participant PromptRefiner
+    participant ImageGenerator
+    participant VisionCritic
+    participant ChatModel
+    participant VisionModel
+    participant SDXL API
+
+    User->>Supervisor: "A red cat riding a skateboard"
+
+    Note over Supervisor: Supervisor reasons about next step
+
+    Supervisor->>PromptRefiner: refinePrompt(userRequest, feedback)
+    PromptRefiner->>ChatModel: Generate optimized SDXL prompts
+    ChatModel-->>PromptRefiner: SdxlPrompts (prompt + negativePrompt)
+    PromptRefiner-->>Supervisor: scope["sdxlPrompts"]
+
+    Supervisor->>ImageGenerator: generateImage(sdxlPrompts)
+    ImageGenerator->>SDXL API: HTTP POST (prompt, negativePrompt)
+    SDXL API-->>ImageGenerator: Image bytes
+    Note over ImageGenerator: Stores imageBase64 in AgenticScope
+    ImageGenerator-->>Supervisor: "Image generated successfully"
+
+    Supervisor->>VisionCritic: critique(userRequest, imageBase64)
+    VisionCritic->>VisionModel: Evaluate image vs request
+    VisionModel-->>VisionCritic: Critique (score + feedback)
+    VisionCritic-->>Supervisor: scope["critique"]
+
+    Note over Supervisor: Supervisor evaluates score via listener
+
+    alt Supervisor decides: score too low, refine again
+        Supervisor->>PromptRefiner: refinePrompt(userRequest, critique.feedback)
+        PromptRefiner->>ChatModel: Refine prompts with feedback
+        ChatModel-->>PromptRefiner: Improved SdxlPrompts
+        PromptRefiner-->>Supervisor: scope["sdxlPrompts"]
+        Supervisor->>ImageGenerator: generateImage(sdxlPrompts)
+        ImageGenerator->>SDXL API: HTTP POST
+        SDXL API-->>ImageGenerator: Improved image
+        ImageGenerator-->>Supervisor: "Image generated successfully"
+        Supervisor->>VisionCritic: critique(userRequest, imageBase64)
+        VisionCritic->>VisionModel: Re-evaluate
+        VisionModel-->>VisionCritic: Higher score
+        VisionCritic-->>Supervisor: scope["critique"]
+    end
+
+    Supervisor-->>User: Summary of process + final score
+
+    Note over Supervisor: LLM decides when to stop (not a fixed loop)
+```
+
+In this module, you'll build an **agentic image generator** using the **LangChain4j Supervisor pattern**. Unlike Module 7's fixed ReAct loop, the **Supervisor** uses an LLM to decide which agent to call next based on the current state:
+
+1. **PromptRefiner** — Creates optimized Stable Diffusion XL prompts from a user description
+2. **ImageGenerator** — Calls the SDXL API to generate an image (stores result in `AgenticScope`)
+3. **VisionCritic** — Evaluates the generated image and provides feedback
+
+The supervisor LLM receives workflow instructions via `supervisorContext` and autonomously decides when to refine, regenerate, or stop.
+
+**Key differences from Module 7 (ReAct Loop)**:
+| | Module 7 (Loop) | Module 8 (Supervisor) |
+|---|---|---|
+| Orchestration | Fixed loop with `exitCondition` | LLM-powered supervisor decides |
+| Builder | `AgenticServices.loopBuilder()` | `AgenticServices.supervisorBuilder()` |
+| ImageGenerator returns | `ImageContent` | `String` (stores image in `AgenticScope`) |
+| Exit logic | Programmatic: `score >= 0.8` | Natural language in `supervisorContext` |
+| Invocation | `agent.invoke(Map.of(...))` | `supervisor.invoke(userRequest)` |
+
+**File to edit**: [ImageGeneratorSupervisor.java](ImageGeneratorSupervisor.java)
+
+> **Note**: This module uses `langchain4j-agentic:1.11.0-beta19` — the new Agentic API for multi-agent orchestration.
+
+---
+
+### 📝 Step 8.1: Define SdxlPrompts Record
+
+**File to edit**: [ImageGeneratorSupervisor.java](ImageGeneratorSupervisor.java)
+
+Define a Java record to hold the SDXL prompt and negative prompt.
+
+💡 **Why a Record?**:
+- Agents communicate via structured data
+- The PromptRefiner will output this record
+- The ImageGenerator will consume it
+
+<details>
+<summary>🔎 Hint 1 — What concept to use</summary>
+
+A simple Java **record** with two `String` fields: `prompt` and `negativePrompt`. This is a data carrier used to pass SDXL prompts between agents.
+
+📖 **Documentation**:
+- [Java Records](https://docs.oracle.com/en/java/javase/21/language/records.html)
+
+</details>
+
+<details>
+<summary>🧩 Hint 2 — Key classes & methods</summary>
+
+- `public record SdxlPrompts(String prompt, String negativePrompt) {}`
+
+</details>
+
+<details>
+<summary>🔧 Hint 3 — VS Code Snippet (last resort!)</summary>
+
+Type `java-73` in VS Code to insert the SdxlPrompts record.
+
+</details>
+
+---
+
+### 📝 Step 8.2: Create the PromptRefiner Agent Interface
+
+**File to edit**: [ImageGeneratorSupervisor.java](ImageGeneratorSupervisor.java)
+
+Create the `PromptRefiner` interface with annotations for system message, agent description, and user message template.
+
+💡 **Why an interface with annotations?**:
+- LangChain4j AI Services use annotated interfaces
+- `@Agent` marks this as a sub-agent with a description and output key
+- `@SystemMessage` provides the LLM persona
+- `@UserMessage` defines the prompt template
+
+<details>
+<summary>🔎 Hint 1 — What concept to use</summary>
+
+An **AI Service interface** with three annotations:
+- `@SystemMessage` — expert prompt engineer persona
+- `@Agent(description = "...", outputKey = "sdxlPrompts")` — agent metadata
+- `@UserMessage` — template with `{{userRequest}}` and `{{feedback}}` variables
+
+The method returns `SdxlPrompts` and takes two `@V`-annotated String parameters.
+
+📖 **Documentation**:
+- [LangChain4j @Agent annotation](https://docs.langchain4j.dev/tutorials/agentic#agent-annotation)
+- [AI Services](https://docs.langchain4j.dev/tutorials/ai-services/)
+
+</details>
+
+<details>
+<summary>🧩 Hint 2 — Key classes & methods</summary>
+
+```java
+@SystemMessage("You are an expert prompt engineer for Stable Diffusion XL...")
+@Agent(description = "Creates or refines SDXL prompts...", outputKey = "sdxlPrompts")
+@UserMessage("User request: \"{{userRequest}}\" ...")
+SdxlPrompts refinePrompt(@V("userRequest") String userRequest, @V("feedback") String feedback);
+```
+
+</details>
+
+<details>
+<summary>🔧 Hint 3 — VS Code Snippet (last resort!)</summary>
+
+Type `java-74` in VS Code to insert the PromptRefiner body.
+
+</details>
+
+---
+
+### 📝 Step 8.3: Create the ImageGenerator Agent Class (Supervisor Version)
+
+**File to edit**: [ImageGeneratorSupervisor.java](ImageGeneratorSupervisor.java)
+
+Create the `ImageGenerator` class with an `@Agent` method that calls the SDXL API and stores the image in the `AgenticScope`.
+
+💡 **Why is this different from Module 7?**:
+- In the **loop** pattern, `ImageGenerator` returns `ImageContent` directly — the loop manages scope automatically
+- In the **supervisor** pattern, `ImageGenerator` returns a `String` status message and **manually writes** the image to `AgenticScope` using `LangChain4jManaged.current()`
+- The supervisor LLM reads the status string; the VisionCritic reads the image from scope
+
+<details>
+<summary>🔎 Hint 1 — What concept to use</summary>
+
+A plain Java **class** (not an interface) with an `@Agent` annotated method:
+- `outputKey = "imageStatus"` (not `"imageBase64"` like Module 7)
+- Returns `String` (status message), not `ImageContent`
+- Uses `LangChain4jManaged.current().get(AgenticScope.class)` to access the shared scope
+- Calls `scope.writeState("imageBase64", imageContent)` to store the image for the VisionCritic
+
+📖 **Documentation**:
+- [LangChain4j AgenticScope](https://docs.langchain4j.dev/tutorials/agentic#scope)
+- [LangChain4j Supervisor](https://docs.langchain4j.dev/tutorials/agentic#supervisor)
+
+</details>
+
+<details>
+<summary>🧩 Hint 2 — Key classes & methods</summary>
+
+```java
+@Agent(value = "Generates an image with SDXL...", outputKey = "imageStatus")
+public String generateImage(@V("sdxlPrompts") SdxlPrompts sdxlPrompts) throws IOException, InterruptedException {
+    // Build HTTP request to SDXL API
+    // Send request and get response bytes
+    // Create ImageContent from base64-encoded response
+    // Get AgenticScope: var scope = (AgenticScope) LangChain4jManaged.current().get(AgenticScope.class);
+    // Store image: scope.writeState("imageBase64", imageContent);
+    // Save to file and return status string
+}
+```
+
+Key imports:
+- `dev.langchain4j.agentic.scope.AgenticScope`
+- `dev.langchain4j.invocation.LangChain4jManaged`
+
+</details>
+
+<details>
+<summary>🔧 Hint 3 — VS Code Snippet (last resort!)</summary>
+
+Type `java-75` in VS Code to insert the ImageGenerator body (supervisor version).
+
+</details>
+
+---
+
+### 📝 Step 8.4: Define Critique Record
+
+**File to edit**: [ImageGeneratorSupervisor.java](ImageGeneratorSupervisor.java)
+
+Define a Java record to hold the critic's evaluation score and feedback.
+
+<details>
+<summary>🔎 Hint 1 — What concept to use</summary>
+
+A simple Java **record** with a `double score` and `String feedback`.
+
+</details>
+
+<details>
+<summary>🧩 Hint 2 — Key classes & methods</summary>
+
+- `public record Critique(double score, String feedback) {}`
+
+</details>
+
+<details>
+<summary>🔧 Hint 3 — VS Code Snippet (last resort!)</summary>
+
+Type `java-76` in VS Code to insert the Critique record.
+
+</details>
+
+---
+
+### 📝 Step 8.5: Create the VisionCritic Agent Interface
+
+**File to edit**: [ImageGeneratorSupervisor.java](ImageGeneratorSupervisor.java)
+
+Create the `VisionCritic` interface that evaluates generated images against the user's original request.
+
+<details>
+<summary>🔎 Hint 1 — What concept to use</summary>
+
+An **AI Service interface** with:
+- `@SystemMessage` — expert image critic persona
+- `@Agent(description = "...", outputKey = "critique")` — agent metadata
+- `@UserMessage` with `{{userRequest}}` template
+- A second `@UserMessage("{{imageBase64}}")` on the `ImageContent` parameter for multimodal input
+
+📖 **Documentation**:
+- [LangChain4j @Agent annotation](https://docs.langchain4j.dev/tutorials/agentic#agent-annotation)
+
+</details>
+
+<details>
+<summary>🧩 Hint 2 — Key classes & methods</summary>
+
+```java
+@SystemMessage("You are an expert image critic...")
+@Agent(description = "Critiques a generated image...", outputKey = "critique")
+@UserMessage("Original user request: \"{{userRequest}}\" ...")
+Critique critique(@V("userRequest") String userRequest, @UserMessage("{{imageBase64}}") ImageContent imageBase64);
+```
+
+</details>
+
+<details>
+<summary>🔧 Hint 3 — VS Code Snippet (last resort!)</summary>
+
+Type `java-77` in VS Code to insert the VisionCritic body.
+
+</details>
+
+---
+
+### 📝 Step 8.6: Create the ChatModel
+
+**File to edit**: [ImageGeneratorSupervisor.java](ImageGeneratorSupervisor.java)
+
+Create the main `ChatModel` instance used by the PromptRefiner and the Supervisor.
+
+<details>
+<summary>🔎 Hint 1 — What concept to use</summary>
+
+Use `OpenAiChatModel.builder()` with OVHcloud AI Endpoints environment variables for API key, base URL, and model name.
+
+📖 **Documentation**:
+- [OpenAI model integration](https://docs.langchain4j.dev/integrations/language-models/open-ai)
+
+</details>
+
+<details>
+<summary>🧩 Hint 2 — Key classes & methods</summary>
+
+```java
+ChatModel chatModel = OpenAiChatModel.builder()
+    .apiKey(System.getenv("OVH_AI_ENDPOINTS_ACCESS_TOKEN"))
+    .baseUrl(System.getenv("OVH_AI_ENDPOINTS_MODEL_URL"))
+    .modelName(System.getenv("OVH_AI_ENDPOINTS_MODEL_NAME"))
+    .temperature(0.0)
+    .timeout(Duration.ofMinutes(5))
+    .build();
+```
+
+</details>
+
+<details>
+<summary>🔧 Hint 3 — VS Code Snippet (last resort!)</summary>
+
+Type `java-78` in VS Code to insert the ChatModel creation.
+
+</details>
+
+---
+
+### 📝 Step 8.7: Create the Vision Model
+
+**File to edit**: [ImageGeneratorSupervisor.java](ImageGeneratorSupervisor.java)
+
+Create a second `ChatModel` instance for the VisionCritic using the vision-capable model.
+
+<details>
+<summary>🔎 Hint 1 — What concept to use</summary>
+
+Same builder pattern as Step 8.6, but using the `OVH_AI_ENDPOINTS_VLLM_MODEL` env variable for the model name (a vision-capable model).
+
+</details>
+
+<details>
+<summary>🧩 Hint 2 — Key classes & methods</summary>
+
+```java
+ChatModel visionModel = OpenAiChatModel.builder()
+    .apiKey(System.getenv("OVH_AI_ENDPOINTS_ACCESS_TOKEN"))
+    .baseUrl(System.getenv("OVH_AI_ENDPOINTS_MODEL_URL"))
+    .modelName(System.getenv("OVH_AI_ENDPOINTS_VLLM_MODEL"))
+    .temperature(0.0)
+    .timeout(Duration.ofMinutes(5))
+    .build();
+```
+
+</details>
+
+<details>
+<summary>🔧 Hint 3 — VS Code Snippet (last resort!)</summary>
+
+Type `java-79` in VS Code to insert the Vision model creation.
+
+</details>
+
+---
+
+### 📝 Step 8.8: Build the PromptRefiner Agent
+
+**File to edit**: [ImageGeneratorSupervisor.java](ImageGeneratorSupervisor.java)
+
+Build the `PromptRefiner` agent using `AgenticServices.agentBuilder()`.
+
+<details>
+<summary>🔎 Hint 1 — What concept to use</summary>
+
+Use `AgenticServices.agentBuilder(PromptRefiner.class)` to create an agent from the interface. Configure it with the chat model, a listener for logging, and the output key.
+
+📖 **Documentation**:
+- [AgenticServices](https://docs.langchain4j.dev/tutorials/agentic#agenticservices)
+
+</details>
+
+<details>
+<summary>🧩 Hint 2 — Key classes & methods</summary>
+
+```java
+PromptRefiner promptRefiner = AgenticServices.agentBuilder(PromptRefiner.class)
+    .chatModel(chatModel)
+    .listener(new AgentListener() { ... })
+    .outputKey("sdxlPrompts")
+    .build();
+```
+
+</details>
+
+<details>
+<summary>🔧 Hint 3 — VS Code Snippet (last resort!)</summary>
+
+Type `java-80` in VS Code to insert the PromptRefiner builder.
+
+</details>
+
+---
+
+### 📝 Step 8.9: Build the VisionCritic Agent
+
+**File to edit**: [ImageGeneratorSupervisor.java](ImageGeneratorSupervisor.java)
+
+Build the `VisionCritic` agent using `AgenticServices.agentBuilder()`.
+
+<details>
+<summary>🔎 Hint 1 — What concept to use</summary>
+
+Same pattern as Step 8.8, but using `VisionCritic.class` and the **vision model** (not the chat model).
+
+</details>
+
+<details>
+<summary>🧩 Hint 2 — Key classes & methods</summary>
+
+```java
+VisionCritic visionCritic = AgenticServices.agentBuilder(VisionCritic.class)
+    .chatModel(visionModel)
+    .listener(new AgentListener() { ... })
+    .outputKey("critique")
+    .build();
+```
+
+</details>
+
+<details>
+<summary>🔧 Hint 3 — VS Code Snippet (last resort!)</summary>
+
+Type `java-81` in VS Code to insert the VisionCritic builder.
+
+</details>
+
+---
+
+### 📝 Step 8.10: Build the SupervisorAgent
+
+**File to edit**: [ImageGeneratorSupervisor.java](ImageGeneratorSupervisor.java)
+
+This is the **key step** that differentiates Module 8 from Module 7. Build the `SupervisorAgent` that orchestrates the three sub-agents.
+
+💡 **Why a Supervisor?**:
+- Unlike a fixed loop, the supervisor **LLM reasons** about what to do next
+- `supervisorContext` provides natural language workflow instructions
+- `responseStrategy(SUMMARY)` tells the supervisor to return a summary when done
+- `maxAgentsInvocations(10)` sets a safety limit
+- The listener's `afterAgentInvocation` + `inheritedBySubagents()` logs critic scores
+
+<details>
+<summary>🔎 Hint 1 — What concept to use</summary>
+
+Use `AgenticServices.supervisorBuilder()` to create a `SupervisorAgent`. Key configuration:
+- `.chatModel(chatModel)` — the LLM that powers the supervisor's reasoning
+- `.subAgents(promptRefiner, new ImageGenerator(), visionCritic)` — the three sub-agents
+- `.responseStrategy(SupervisorResponseStrategy.SUMMARY)` — supervisor summarizes at the end
+- `.maxAgentsInvocations(10)` — safety limit for total agent calls
+- `.supervisorContext(...)` — natural language workflow instructions
+- `.listener(...)` — `AgentListener` with `afterAgentInvocation` (not `before`) and `inheritedBySubagents() = true`
+
+📖 **Documentation**:
+- [LangChain4j Supervisor](https://docs.langchain4j.dev/tutorials/agentic#supervisor)
+- [AgentListener](https://docs.langchain4j.dev/tutorials/agentic#agenticservices)
+
+</details>
+
+<details>
+<summary>🧩 Hint 2 — Key classes & methods</summary>
+
+```java
+SupervisorAgent supervisor = AgenticServices.supervisorBuilder()
+    .chatModel(chatModel)
+    .subAgents(promptRefiner, new ImageGenerator(), visionCritic)
+    .responseStrategy(SupervisorResponseStrategy.SUMMARY)
+    .maxAgentsInvocations(10)
+    .supervisorContext("""
+        You are an image generation supervisor. Your goal is to produce
+        the best possible image matching the user's request.
+        Follow this workflow: ...
+        """)
+    .listener(new AgentListener() {
+        @Override
+        public void afterAgentInvocation(AgentResponse response) {
+            if (response.agentName().equals("critique")) {
+                var critique = (Critique) response.output();
+                // Log score and feedback
+            }
+        }
+        @Override
+        public boolean inheritedBySubagents() { return true; }
+    })
+    .build();
+```
+
+Key imports:
+- `dev.langchain4j.agentic.supervisor.SupervisorAgent`
+- `dev.langchain4j.agentic.supervisor.SupervisorResponseStrategy`
+- `dev.langchain4j.agentic.observability.AgentResponse`
+
+</details>
+
+<details>
+<summary>🔧 Hint 3 — VS Code Snippet (last resort!)</summary>
+
+Type `java-82` in VS Code to insert the SupervisorAgent builder.
+
+</details>
+
+---
+
+### 📝 Step 8.11: Read User Input and Invoke the Supervisor
+
+**File to edit**: [ImageGeneratorSupervisor.java](ImageGeneratorSupervisor.java)
+
+Read the user's image description and invoke the supervisor.
+
+💡 **Simpler than Module 7!**:
+- No need for `Map.of(...)` with initial state
+- The supervisor takes a simple `String` as input
+- It returns a result (the supervisor's summary)
+
+<details>
+<summary>🔎 Hint 1 — What concept to use</summary>
+
+Read user input with `IO.readln()`, then call `supervisor.invoke(userRequest)`. The supervisor handles everything from there — calling sub-agents in the right order based on its context instructions.
+
+</details>
+
+<details>
+<summary>🧩 Hint 2 — Key classes & methods</summary>
+
+```java
+IO.println("🤖: Enter your image description:");
+var userRequest = IO.readln();
+var result = supervisor.invoke(userRequest);
+IO.println("➡️ Result: " + result);
+```
+
+</details>
+
+<details>
+<summary>🔧 Hint 3 — VS Code Snippet (last resort!)</summary>
+
+Type `java-83` in VS Code to insert the user input and supervisor invocation.
+
+</details>
+
+---
+
+### 🧪 Step 8.12: Test Your Supervisor-Based Image Generator
+
+Run the supervisor-based image generator:
+```bash
+./run-jbang.sh ImageGeneratorSupervisor.java
+```
+
+Try:
+```
+Enter your image description:
+A red cat sleeping on a velvet couch
+```
+
+✅ **Expected**:
+- The supervisor calls PromptRefiner to create optimized SDXL prompts
+- ImageGenerator calls the SDXL API and stores the image in AgenticScope
+- VisionCritic evaluates the image (score + feedback printed via listener)
+- If score < 0.8, the supervisor autonomously decides to refine and regenerate
+- The supervisor provides a final summary when satisfied or after max invocations
+- Generated image saved as `generated-image.jpeg`
+
+💡 **Compare with Module 7**: Notice how the supervisor makes its own decisions about when to stop, rather than following a fixed `exitCondition`. The workflow is more flexible and can adapt to unexpected situations.
+
+---
+
 ## 🎓 Workshop Complete! 🎓
 
 Congratulations! You've built complete AI-powered applications with LangChain4j:
@@ -2380,6 +2961,7 @@ Congratulations! You've built complete AI-powered applications with LangChain4j:
 - ✅ Function calling with image generation
 - ✅ MCP client consuming remote tools
 - ✅ Agentic image generator with ReAct loop
+- ✅ Agentic image generator with Supervisor pattern
 
 ### 🚀 Next Steps
 
