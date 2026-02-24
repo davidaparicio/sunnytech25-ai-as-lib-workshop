@@ -2373,6 +2373,8 @@ A red cat sleeping on a velvet couch
 
 ## 🧑‍💼 Module 8: Agentic Image Generator (Supervisor Pattern)
 
+![](../../../../assets/l4j-supervisor-image-generator-agent.png)
+
 ### 🎯 Architecture Overview
 
 ```mermaid
