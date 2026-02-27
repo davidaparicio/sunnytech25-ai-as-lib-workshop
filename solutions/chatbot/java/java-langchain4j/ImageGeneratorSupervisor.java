@@ -5,6 +5,7 @@
 
 import dev.langchain4j.agentic.Agent;
 import dev.langchain4j.agentic.AgenticServices;
+import dev.langchain4j.agentic.UntypedAgent;
 import dev.langchain4j.agentic.observability.AgentListener;
 import dev.langchain4j.agentic.observability.AgentRequest;
 import dev.langchain4j.agentic.observability.AgentResponse;
@@ -58,7 +59,7 @@ public class ImageGenerator {
 
   // java-75
   // Add @Agent method that calls SDXL API, stores image in AgenticScope, and returns status String
-  @Agent(value = "Generates an image with Stable Diffusion XL given SDXL prompts (prompt and negative prompt). Returns a status message. The generated image is stored internally for the critic to evaluate.", outputKey = "imageStatus")
+  @Agent(value = "Generates an image with Stable Diffusion XL given SDXL prompts (prompt and negative prompt). Returns a status message. The generated image is stored internally for the critic to evaluate.", outputKey = "imagePath")
   public String generateImage(@V("sdxlPrompts") SdxlPrompts sdxlPrompts) throws IOException, InterruptedException {
     IO.println("🏞️ Generating image with SDXL prompts...");
 
@@ -78,13 +79,9 @@ public class ImageGenerator {
 
     IO.println("SDXL status code: " + response.statusCode());
 
-    var imageContent = ImageContent.from(Base64.getEncoder().encodeToString(response.body()), "image/jpeg");
-    var scope = (AgenticScope) LangChain4jManaged.current().get(AgenticScope.class);
-    scope.writeState("imageBase64", imageContent);
-
     Files.write(Path.of("generated-image.jpeg"), response.body());
 
-    return "Image generated successfully (HTTP %d)".formatted(response.statusCode());
+    return Path.of("generated-image.jpeg").toString();
   }
 }
 
@@ -148,6 +145,17 @@ void main() {
       .build();
 
   // java-81
+  // Build the ImageGenerator agent with AgenticServices.sequenceBuilder
+  UntypedAgent imageGenerator = AgenticServices.sequenceBuilder()
+      .subAgents(new ImageGenerator())
+      .output(agenticScope -> {
+        String imageLocation = agenticScope.readState("imagePath", "");
+        agenticScope.writeState("imageBase64",  ImageContent.from(Path.of(imageLocation), "image/jpeg"));
+        return imageLocation;
+      })
+      .build();
+
+  // java-82
   // Build the VisionCritic agent with AgenticServices.agentBuilder
   VisionCritic visionCritic = AgenticServices.agentBuilder(VisionCritic.class)
       .chatModel(visionModel)
@@ -160,12 +168,12 @@ void main() {
       .outputKey("critique")
       .build();
 
-  // java-82
+  // java-83
   // Build the SupervisorAgent with AgenticServices.supervisorBuilder,
   // subAgents, responseStrategy, maxAgentsInvocations, supervisorContext, and listener
   SupervisorAgent supervisor = AgenticServices.supervisorBuilder()
       .chatModel(chatModel)
-      .subAgents(promptRefiner, new ImageGenerator(), visionCritic)
+      .subAgents(promptRefiner, imageGenerator, visionCritic)
       .responseStrategy(SupervisorResponseStrategy.SUMMARY)
       .maxAgentsInvocations(10)
       .supervisorContext("""
@@ -195,7 +203,7 @@ void main() {
       })
       .build();
 
-  // java-83
+  // java-84
   // Read user input and invoke the supervisor
   IO.println("🤖: Enter your image description:");
   var userRequest = IO.readln();
